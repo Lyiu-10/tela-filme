@@ -15,6 +15,7 @@
   #pararBtn { background: #dc2626; border-color: #dc2626; }
   p { margin: 6px 16px; }
   #info { color: #fbbf24; }
+  #diag { color: #888; font-size: 13px; white-space: pre-line; }
   video { width: 100%; max-height: 80vh; background: #111; }
 </style>
 
@@ -30,6 +31,7 @@
   </div>
   <p id="quem"></p>
   <p id="situacao"></p>
+  <p id="diag"></p>
 </div>
 <p id="info"></p>
 <video id="v" autoplay playsinline controls></video>
@@ -44,7 +46,7 @@ const peer = new Peer(souDono ? 'tf-' + Math.random().toString(36).slice(2, 8) :
 const podeTransmitir = !!navigator.mediaDevices?.getDisplayMedia;   // celular não transmite tela
 
 let estado = { membros: {}, transmissor: null };   // nome de cada um (por id) e quem transmite
-let hub, dentro = false, tela = null, ultimoHub = 0, ultimoT = null;
+let hub, dentro = false, tela = null, ultimoHub = 0, ultimoT = null, recebendo = null;
 const conexoes = {}, chamadas = {}, vistos = {};
 const aviso = t => $('info').textContent = t;
 
@@ -135,8 +137,45 @@ const enviar = m => souDono ? pedido(peer.id, m) : hub.open && hub.send(m);
 // --- vídeo: quem transmite liga para cada pessoa da sala ---
 peer.on('call', c => {
   c.answer();
+  recebendo = c;
   c.on('stream', s => { $('v').srcObject = s; $('v').muted = false; });
 });
+
+// --- diagnóstico a cada 3 s: o que sai (quem transmite) ou chega (quem assiste) ---
+const anteriores = {};
+async function medida(pc, lado, chave) {
+  const r = await pc.getStats();
+  let v, par;
+  r.forEach(s => {
+    if (s.type === lado && s.kind === 'video') v = s;
+    if (s.type === 'transport') par = r.get(s.selectedCandidatePairId);
+  });
+  if (!v) return 'conectando...';
+  const bytes = v.bytesSent ?? v.bytesReceived, a = anteriores[chave];
+  anteriores[chave] = { b: bytes, t: v.timestamp };
+  const mbps = a ? Math.max(0, (bytes - a.b) * 8 / (v.timestamp - a.t) / 1000) : 0;   // max: chamada nova zera o contador
+  const tipo = r.get(par?.localCandidateId)?.candidateType;
+  let txt = (v.frameWidth || 0) + 'x' + (v.frameHeight || 0) + ' · ' + Math.round(v.framesPerSecond || 0) + ' fps · ' + mbps.toFixed(1) + ' Mbps';
+  if (tipo) txt += tipo === 'relay' ? ' · via retransmissor' : ' · direto';
+  const freio = { bandwidth: 'internet', cpu: 'processador' }[v.qualityLimitationReason];
+  if (freio) txt += ' · segurando por: ' + freio;
+  if (v.packetsReceived) txt += ' · perda ' + (100 * v.packetsLost / (v.packetsLost + v.packetsReceived)).toFixed(1) + '%';
+  return txt;
+}
+setInterval(async () => {
+  const linhas = [], v = $('v');
+  try {
+    if (tela) {
+      if (!tela.getAudioTracks().length) linhas.push('SEM SOM: pare, transmita de novo e escolha "Tela inteira" com "Compartilhar áudio do sistema" ligado (ou a guia do filme com "Compartilhar áudio da guia").');
+      for (const id in chamadas) if (chamadas[id].peerConnection)
+        linhas.push((estado.membros[id] || '?') + ': ' + await medida(chamadas[id].peerConnection, 'outbound-rtp', id));
+    } else if (recebendo?.peerConnection && v.srcObject) {
+      if (!v.srcObject.getAudioTracks().length) linhas.push('Sem som: quem transmite não está mandando o áudio.');
+      linhas.push('Chegando: ' + await medida(recebendo.peerConnection, 'inbound-rtp', 'eu'));
+    }
+  } catch {}
+  $('diag').textContent = linhas.join('\n');
+}, 3000);
 
 $('transmitirBtn').onclick = async () => {
   try { tela = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: true }); }
