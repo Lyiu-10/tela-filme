@@ -8,7 +8,7 @@
   [hidden] { display: none !important; }
   body { margin: 0; background: #000; color: #ddd; font: 16px system-ui, sans-serif; text-align: center; }
   .barra { padding: 12px 16px; display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
-  input, button { font: inherit; padding: 10px 18px; border-radius: 8px; border: 1px solid #444; background: #1c1c1c; color: #eee; }
+  input, button, select { font: inherit; padding: 10px 18px; border-radius: 8px; border: 1px solid #444; background: #1c1c1c; color: #eee; }
   button { cursor: pointer; }
   button:disabled { opacity: .45; cursor: default; }
   #transmitirBtn { background: #2563eb; border-color: #2563eb; }
@@ -27,7 +27,13 @@
   <div class="barra">
     <button id="compartilharBtn">Copiar link da sala</button>
     <button id="transmitirBtn">Transmitir minha tela</button>
+    <button id="trocarBtn" hidden>Trocar o que transmito</button>
     <button id="pararBtn" hidden>Parar de transmitir</button>
+  </div>
+  <div id="qualidade" class="barra" hidden>
+    <label>Resolução <select id="resSel"><option value="720">720p</option><option value="1080" selected>1080p</option><option value="0">Original</option></select></label>
+    <label>FPS <select id="fpsSel"><option>30</option><option>60</option></select></label>
+    <label>Internet por pessoa <select id="mbpsSel"><option>3</option><option selected>6</option><option>10</option></select> Mbps</label>
   </div>
   <p id="quem"></p>
   <p id="situacao"></p>
@@ -167,8 +173,10 @@ setInterval(async () => {
   try {
     if (tela) {
       if (!tela.getAudioTracks().length) linhas.push('SEM SOM: pare, transmita de novo e escolha "Tela inteira" com "Compartilhar áudio do sistema" ligado (ou a guia do filme com "Compartilhar áudio da guia").');
-      for (const id in chamadas) if (chamadas[id].peerConnection)
+      for (const id in chamadas) if (chamadas[id].peerConnection) {
+        await ajustar(chamadas[id]).catch(() => {});   // pega quem entrou depois da última mudança
         linhas.push((estado.membros[id] || '?') + ': ' + await medida(chamadas[id].peerConnection, 'outbound-rtp', id));
+      }
     } else if (recebendo?.peerConnection && v.srcObject) {
       if (!v.srcObject.getAudioTracks().length) linhas.push('Sem som: quem transmite não está mandando o áudio.');
       linhas.push('Chegando: ' + await medida(recebendo.peerConnection, 'inbound-rtp', 'eu'));
@@ -177,17 +185,62 @@ setInterval(async () => {
   $('diag').textContent = linhas.join('\n');
 }, 3000);
 
-$('transmitirBtn').onclick = async () => {
-  try { tela = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: true }); }
-  catch (e) { aviso('Erro: ' + e.name + ' (cancelou ou negou a captura? clique de novo)'); return; }
-  const video = tela.getVideoTracks()[0];
+const cfg = () => ({ res: +$('resSel').value, fps: +$('fpsSel').value, mbps: +$('mbpsSel').value });
+async function capturar() {
+  // surfaceSwitching: o Chrome mostra "Compartilhar esta guia" nas outras guias, troca sem cair
+  const s = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: cfg().fps }, audio: true, surfaceSwitching: 'include' });
+  const video = s.getVideoTracks()[0];
   video.contentHint = 'motion';     // filme: fluidez antes de nitidez de texto
-  video.onended = parar;            // botão "Parar de compartilhar" do próprio Chrome
+  video.onended = () => { if (tela === s) parar(); };   // botão "Parar de compartilhar" do próprio Chrome
+  return s;
+}
+$('transmitirBtn').onclick = async () => {
+  try { tela = await capturar(); }
+  catch (e) { aviso('Erro: ' + e.name + ' (cancelou ou negou a captura? clique de novo)'); return; }
   aviso('');
   enviar({ transmitir: true });
   render();
 };
 $('pararBtn').onclick = parar;
+
+// Trocar a fonte no meio: troca a faixa dentro de cada ligação, sem derrubar ninguém
+$('trocarBtn').onclick = async () => {
+  let nova;
+  try { nova = await capturar(); } catch { return; }   // cancelou: segue a de antes
+  if (!tela) { nova.getTracks().forEach(t => t.stop()); return; }   // parou enquanto escolhia
+  const velha = tela;
+  tela = nova;
+  for (const id in chamadas) {
+    const pc = chamadas[id].peerConnection;
+    const faixa = k => pc?.getTransceivers().find(t => t.receiver.track.kind === k)?.sender;
+    const som = nova.getAudioTracks()[0] || null;
+    if (faixa('video') && (faixa('audio') || !som)) {
+      await faixa('video').replaceTrack(nova.getVideoTracks()[0]);
+      if (faixa('audio')) await faixa('audio').replaceTrack(som);
+    } else { chamadas[id].close(); delete chamadas[id]; }   // ligação sem canal de som: render() liga de novo
+  }
+  velha.getTracks().forEach(t => t.stop());
+  aplicarQualidade();
+  render();
+};
+
+// Qualidade ao vivo (como no Discord): muda o codificador de cada ligação, sem renegociar
+async function ajustar(c) {
+  const s = c.peerConnection?.getSenders().find(x => x.track?.kind === 'video');
+  const p = s?.getParameters(), e = p?.encodings?.[0];
+  if (!e || !tela) return;          // ainda negociando: o laço de 3 s tenta de novo
+  const { res, fps, mbps } = cfg(), h = tela.getVideoTracks()[0].getSettings().height || res;
+  const novo = { maxBitrate: mbps * 1e6, maxFramerate: fps, scaleResolutionDownBy: res ? Math.max(1, h / res) : 1 };
+  if (Object.keys(novo).every(k => e[k] === novo[k])) return;
+  Object.assign(e, novo);
+  await s.setParameters(p);
+}
+function aplicarQualidade() {
+  if (!tela) return;
+  tela.getVideoTracks()[0].applyConstraints({ frameRate: cfg().fps }).catch(() => {});
+  for (const id in chamadas) ajustar(chamadas[id]).catch(() => {});
+}
+['resSel', 'fpsSel', 'mbpsSel'].forEach(id => $(id).onchange = aplicarQualidade);
 
 function parar() {
   if (!tela) return;
@@ -221,7 +274,7 @@ function render() {
   } else if (!t) v.srcObject = null;
   $('transmitirBtn').hidden = transmitindo || !podeTransmitir;
   $('transmitirBtn').disabled = !!t || !!tela;
-  $('pararBtn').hidden = !transmitindo;
+  $('pararBtn').hidden = $('trocarBtn').hidden = $('qualidade').hidden = !transmitindo;
   $('quem').textContent = 'Na sala: ' + Object.values(estado.membros).join(', ');
   $('situacao').textContent = !t ? 'Ninguém transmitindo. Quem vai passar o filme?'
     : t === eu ? 'Você está transmitindo.' : estado.membros[t] + ' está transmitindo.';
