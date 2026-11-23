@@ -3,39 +3,188 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sessão de Filme</title>
+<link rel="icon" href="data:,">
 <style>
+  [hidden] { display: none !important; }
   body { margin: 0; background: #000; color: #ddd; font: 16px system-ui, sans-serif; text-align: center; }
-  button { margin: 16px; padding: 12px 24px; font-size: 18px; cursor: pointer; }
-  #info { margin: 8px 16px; word-break: break-all; user-select: all; }
-  video { width: 100%; max-height: 85vh; background: #111; }
+  .barra { padding: 12px 16px; display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+  input, button { font: inherit; padding: 10px 18px; border-radius: 8px; border: 1px solid #444; background: #1c1c1c; color: #eee; }
+  button { cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  #transmitirBtn { background: #2563eb; border-color: #2563eb; }
+  #pararBtn { background: #dc2626; border-color: #dc2626; }
+  p { margin: 6px 16px; }
+  #info { color: #fbbf24; }
+  video { width: 100%; max-height: 80vh; background: #111; }
 </style>
-<button id="btn" disabled>Transmitir minha tela</button>
-<p id="info">Conectando ao servidor...</p>
+
+<form id="entrada" class="barra">
+  <input id="nome" placeholder="Seu nome" maxlength="20" required>
+  <button id="entrarBtn" disabled>Conectando...</button>
+</form>
+<div id="painel" hidden>
+  <div class="barra">
+    <button id="compartilharBtn">Copiar link da sala</button>
+    <button id="transmitirBtn">Transmitir minha tela</button>
+    <button id="pararBtn" hidden>Parar de transmitir</button>
+  </div>
+  <p id="quem"></p>
+  <p id="situacao"></p>
+</div>
+<p id="info"></p>
 <video id="v" autoplay playsinline controls></video>
+
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
-const peer = new Peer();
+const $ = id => document.getElementById(id);
 const sala = location.hash.slice(1);
-peer.on('open', () => { btn.disabled = false; info.textContent = ''; });
-peer.on('error', e => info.textContent = 'Erro: ' + e.type);
+const souDono = !sala;            // sem # na URL: eu crio a sala e organizo quem está nela
+// ponytail: a sala vive na aba de quem criou; se essa aba fechar, a sala acaba
+const peer = new Peer(souDono ? 'tf-' + Math.random().toString(36).slice(2, 8) : undefined);
+const podeTransmitir = !!navigator.mediaDevices?.getDisplayMedia;   // celular não transmite tela
 
-if (sala) {                                   // quem assiste
-  btn.textContent = 'Assistir';               // o clique libera o som (autoplay do navegador)
-  btn.onclick = () => { btn.hidden = true; info.textContent = 'Esperando a transmissão...'; peer.connect(sala); };
-  peer.on('call', c => {
-    c.answer();
-    c.on('stream', s => { v.srcObject = s; info.textContent = ''; });
+let estado = { membros: {}, transmissor: null };   // nome de cada um (por id) e quem transmite
+let hub, dentro = false, tela = null, ultimoHub = 0, ultimoT = null;
+const conexoes = {}, chamadas = {}, vistos = {};
+const aviso = t => $('info').textContent = t;
+
+try { $('nome').value = localStorage.nome || ''; } catch {}
+peer.on('open', () => {
+  $('entrarBtn').disabled = false;
+  $('entrarBtn').textContent = souDono ? 'Criar sala' : 'Entrar na sala';
+});
+peer.on('error', e => aviso(e.type === 'peer-unavailable' && !dentro
+  ? 'Sala não encontrada: o link é velho ou quem criou a sala fechou a aba.'
+  : 'Erro: ' + e.type));
+addEventListener('beforeunload', () => peer.destroy());
+
+$('entrada').onsubmit = e => {      // o clique também libera o som do vídeo no navegador
+  e.preventDefault();
+  const meuNome = $('nome').value.trim().slice(0, 20);
+  if (!meuNome) return;
+  try { localStorage.nome = meuNome; } catch {}
+  $('entrada').hidden = true;
+  if (souDono) {
+    dentro = true;
+    $('painel').hidden = false;
+    aviso('Sala criada! Clique em "Copiar link da sala" e mande no grupo.');
+    pedido(peer.id, { nome: meuNome });
+    return;
+  }
+  aviso('Entrando...');
+  hub = peer.connect(sala, { reliable: true });
+  hub.on('open', () => {
+    dentro = true;
+    ultimoHub = Date.now();
+    $('painel').hidden = false;
+    aviso('');
+    hub.send({ nome: meuNome });
   });
-} else {                                      // quem transmite
-  btn.onclick = async () => {
-    let tela;
-    try { tela = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: true }); }
-    catch (e) { info.textContent = 'Erro: ' + e.name + ' (cancelou ou negou a captura? clique de novo)'; return; }
-    tela.getVideoTracks()[0].contentHint = 'motion';   // filme: fluidez antes de nitidez de texto
-    v.srcObject = tela; v.muted = true;
-    btn.hidden = true;
-    info.textContent = 'Mande este link: ' + location.href.split('#')[0] + '#' + peer.id;
-    peer.on('connection', c => peer.call(c.peer, tela));
-  };
+  hub.on('data', s => { ultimoHub = Date.now(); estado = s; render(); });
+  hub.on('close', salaCaiu);
+};
+function salaCaiu() {
+  if (!dentro) return;
+  dentro = false;
+  parar();
+  hub.close();
+  $('painel').hidden = true;
+  $('v').srcObject = null;
+  aviso('Você saiu da sala: quem criou fechou a aba ou a conexão caiu. Peça um link novo.');
+}
+
+// Sinal de vida a cada 5 s: quem some sem fechar a aba (PC dormiu, internet caiu) sai em ~15 s
+setInterval(() => {
+  if (!dentro) return;
+  if (souDono) {
+    for (const id in conexoes) if (Date.now() - vistos[id] > 15000) sair(id);
+    publicar();                     // o estado reenviado é o sinal de vida do dono
+  } else if (Date.now() - ultimoHub > 15000) salaCaiu();
+  else if (hub.open) hub.send({ oi: 1 });
+}, 5000);
+
+// --- só o dono roda isto: recebe os pedidos e manda o estado da sala para todos ---
+if (souDono) peer.on('connection', c => {
+  c.on('open', () => { conexoes[c.peer] = c; vistos[c.peer] = Date.now(); });
+  c.on('data', m => { vistos[c.peer] = Date.now(); if (!m?.oi) pedido(c.peer, m); });
+  c.on('close', () => sair(c.peer));
+});
+function sair(id) {
+  const c = conexoes[id];
+  if (!c) return;
+  delete conexoes[id];              // apaga antes do close(), que chama sair() de novo
+  delete vistos[id];
+  delete estado.membros[id];
+  if (estado.transmissor === id) estado.transmissor = null;
+  c.close();
+  publicar();
+}
+function pedido(de, m) {
+  if (!m) return;
+  if (m.nome) estado.membros[de] = String(m.nome).slice(0, 20);
+  if (m.transmitir && !estado.transmissor) estado.transmissor = de;   // um por vez: quem pedir primeiro
+  if (m.parar && estado.transmissor === de) estado.transmissor = null;
+  publicar();
+}
+function publicar() {
+  for (const c of Object.values(conexoes)) if (c.open) c.send(estado);
+  render();
+}
+const enviar = m => souDono ? pedido(peer.id, m) : hub.open && hub.send(m);
+
+// --- vídeo: quem transmite liga para cada pessoa da sala ---
+peer.on('call', c => {
+  c.answer();
+  c.on('stream', s => { $('v').srcObject = s; $('v').muted = false; });
+});
+
+$('transmitirBtn').onclick = async () => {
+  try { tela = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: true }); }
+  catch (e) { aviso('Erro: ' + e.name + ' (cancelou ou negou a captura? clique de novo)'); return; }
+  const video = tela.getVideoTracks()[0];
+  video.contentHint = 'motion';     // filme: fluidez antes de nitidez de texto
+  video.onended = parar;            // botão "Parar de compartilhar" do próprio Chrome
+  aviso('');
+  enviar({ transmitir: true });
+  render();
+};
+$('pararBtn').onclick = parar;
+
+function parar() {
+  if (!tela) return;
+  tela.getTracks().forEach(t => t.stop());
+  tela = null;
+  for (const id in chamadas) { chamadas[id].close(); delete chamadas[id]; }
+  enviar({ parar: true });
+  render();
+}
+
+$('compartilharBtn').onclick = async () => {
+  const link = location.origin + location.pathname + '#' + (sala || peer.id);
+  try { await navigator.clipboard.writeText(link); $('compartilharBtn').textContent = 'Link copiado!'; }
+  catch { aviso('Copie o link: ' + link); }
+  setTimeout(() => $('compartilharBtn').textContent = 'Copiar link da sala', 2000);
+};
+
+function render() {
+  const eu = peer.id, t = estado.transmissor, v = $('v');
+  if (t !== ultimoT) { ultimoT = t; aviso(''); }   // mudou quem transmite: apaga aviso velho
+  if (tela && t && t !== eu) {      // pedi junto com outra pessoa e ela chegou antes
+    tela.getTracks().forEach(x => x.stop());
+    tela = null;
+    aviso(estado.membros[t] + ' começou a transmitir antes de você.');
+  }
+  const transmitindo = !!tela && t === eu;
+  if (transmitindo) {
+    for (const id in estado.membros)          // inclui quem entrou no meio do filme
+      if (id !== eu && !chamadas[id]) chamadas[id] = peer.call(id, tela);
+    if (v.srcObject !== tela) { v.srcObject = tela; v.muted = true; }   // prévia muda
+  } else if (!t) v.srcObject = null;
+  $('transmitirBtn').hidden = transmitindo || !podeTransmitir;
+  $('transmitirBtn').disabled = !!t || !!tela;
+  $('pararBtn').hidden = !transmitindo;
+  $('quem').textContent = 'Na sala: ' + Object.values(estado.membros).join(', ');
+  $('situacao').textContent = !t ? 'Ninguém transmitindo. Quem vai passar o filme?'
+    : t === eu ? 'Você está transmitindo.' : estado.membros[t] + ' está transmitindo.';
 }
 </script>
