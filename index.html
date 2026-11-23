@@ -172,7 +172,7 @@ setInterval(async () => {
   const linhas = [], v = $('v');
   try {
     if (tela) {
-      if (!tela.getAudioTracks().length) linhas.push('SEM SOM: pare, transmita de novo e escolha "Tela inteira" com "Compartilhar áudio do sistema" ligado (ou a guia do filme com "Compartilhar áudio da guia").');
+      if (!tela.getAudioTracks().length) linhas.push('SEM SOM: pare, transmita de novo e escolha "Tela inteira" com "Compartilhar áudio do sistema" ligado (ou a guia/janela do filme com a opção de compartilhar o áudio dela ligada).');
       for (const id in chamadas) if (chamadas[id].peerConnection) {
         await ajustar(chamadas[id]).catch(() => {});   // pega quem entrou depois da última mudança
         linhas.push((estado.membros[id] || '?') + ': ' + await medida(chamadas[id].peerConnection, 'outbound-rtp', id));
@@ -188,7 +188,8 @@ setInterval(async () => {
 const cfg = () => ({ res: +$('resSel').value, fps: +$('fpsSel').value, mbps: +$('mbpsSel').value });
 async function capturar() {
   // surfaceSwitching: o Chrome mostra "Compartilhar esta guia" nas outras guias, troca sem cair
-  const s = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: cfg().fps }, audio: true, surfaceSwitching: 'include' });
+  // windowAudio 'window': ao escolher uma Janela, oferece só o som dela (Chrome 141+; navegador antigo ignora)
+  const s = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: cfg().fps }, audio: true, surfaceSwitching: 'include', windowAudio: 'window' });
   const video = s.getVideoTracks()[0];
   video.contentHint = 'motion';     // filme: fluidez antes de nitidez de texto
   video.onended = () => { if (tela === s) parar(); };   // botão "Parar de compartilhar" do próprio Chrome
