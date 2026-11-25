@@ -29,6 +29,7 @@
     <button id="transmitirBtn">Transmitir minha tela</button>
     <button id="trocarBtn" hidden>Trocar o que transmito</button>
     <button id="pararBtn" hidden>Parar de transmitir</button>
+    <button id="telaCheiaBtn" hidden>Tela cheia</button>
   </div>
   <div id="qualidade" class="barra" hidden>
     <label>Resolução <select id="resSel"><option value="720">720p</option><option value="1080" selected>1080p</option><option value="0">Original</option></select></label>
@@ -151,9 +152,10 @@ peer.on('call', c => {
 const anteriores = {};
 async function medida(pc, lado, chave) {
   const r = await pc.getStats();
-  let v, par;
+  let v, par, volta;                // volta: o que o espectador relata de volta (só existe para quem transmite)
   r.forEach(s => {
     if (s.type === lado && s.kind === 'video') v = s;
+    if (s.type === 'remote-inbound-rtp' && s.kind === 'video') volta = s;
     if (s.type === 'transport') par = r.get(s.selectedCandidatePairId);
   });
   if (!v) return 'conectando...';
@@ -165,6 +167,10 @@ async function medida(pc, lado, chave) {
   if (tipo) txt += tipo === 'relay' ? ' · via retransmissor' : ' · direto';
   const freio = { bandwidth: 'internet', cpu: 'processador' }[v.qualityLimitationReason];
   if (freio) txt += ' · segurando por: ' + freio;
+  // banda que o Chrome acha que tem até essa pessoa, ping e perda: dizem POR QUE a internet segura
+  if (volta && par?.availableOutgoingBitrate) txt += ' · banda estimada ' + (par.availableOutgoingBitrate / 1e6).toFixed(1) + ' Mbps';
+  if (volta?.roundTripTime != null) txt += ' · ping ' + Math.round(volta.roundTripTime * 1000) + ' ms';
+  if (volta?.fractionLost != null) txt += ' · perda ' + (volta.fractionLost * 100).toFixed(1) + '%';
   if (v.packetsReceived) txt += ' · perda ' + (100 * v.packetsLost / (v.packetsLost + v.packetsReceived)).toFixed(1) + '%';
   return txt;
 }
@@ -189,7 +195,11 @@ const cfg = () => ({ res: +$('resSel').value, fps: +$('fpsSel').value, mbps: +$(
 async function capturar() {
   // surfaceSwitching: o Chrome mostra "Compartilhar esta guia" nas outras guias, troca sem cair
   // windowAudio 'window': ao escolher uma Janela, oferece só o som dela (Chrome 141+; navegador antigo ignora)
-  const s = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: cfg().fps }, audio: true, surfaceSwitching: 'include', windowAudio: 'window' });
+  // Tamanho máximo = este monitor. Sem isso, o Chrome (até a 159) junta a maior largura e a maior altura de TODOS os
+  // monitores (2560 do principal + 1920 do monitor em pé = 4:3) e põe a tela cheia da guia transmitida nesse formato:
+  // o filme ia com faixas pretas para todo mundo. Com isso, a tela cheia da guia fica no formato do monitor (16:9).
+  const tam = { width: { max: Math.round(screen.width * devicePixelRatio) }, height: { max: Math.round(screen.height * devicePixelRatio) } };
+  const s = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: cfg().fps, ...tam }, audio: true, surfaceSwitching: 'include', windowAudio: 'window' });
   const video = s.getVideoTracks()[0];
   video.contentHint = 'motion';     // filme: fluidez antes de nitidez de texto
   video.onended = () => { if (tela === s) parar(); };   // botão "Parar de compartilhar" do próprio Chrome
@@ -203,6 +213,9 @@ $('transmitirBtn').onclick = async () => {
   render();
 };
 $('pararBtn').onclick = parar;
+// O navegador só entra em tela cheia com um clique de quem assiste (não dá para o transmissor forçar).
+// Fica no próprio <video>: continua em tela cheia se a transmissão cair, voltar ou trocar de pessoa, até o Esc.
+$('telaCheiaBtn').onclick = () => $('v').requestFullscreen().catch(() => {});
 
 // Trocar a fonte no meio: troca a faixa dentro de cada ligação, sem derrubar ninguém
 $('trocarBtn').onclick = async () => {
@@ -276,6 +289,7 @@ function render() {
   $('transmitirBtn').hidden = transmitindo || !podeTransmitir;
   $('transmitirBtn').disabled = !!t || !!tela;
   $('pararBtn').hidden = $('trocarBtn').hidden = $('qualidade').hidden = !transmitindo;
+  $('telaCheiaBtn').hidden = !t || t === eu;
   $('quem').textContent = 'Na sala: ' + Object.values(estado.membros).join(', ');
   $('situacao').textContent = !t ? 'Ninguém transmitindo. Quem vai passar o filme?'
     : t === eu ? 'Você está transmitindo.' : estado.membros[t] + ' está transmitindo.';
