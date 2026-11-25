@@ -198,7 +198,9 @@ async function capturar() {
   // Tamanho máximo = este monitor. Sem isso, o Chrome (até a 159) junta a maior largura e a maior altura de TODOS os
   // monitores (2560 do principal + 1920 do monitor em pé = 4:3) e põe a tela cheia da guia transmitida nesse formato:
   // o filme ia com faixas pretas para todo mundo. Com isso, a tela cheia da guia fica no formato do monitor (16:9).
-  const tam = { width: { max: Math.round(screen.width * devicePixelRatio) }, height: { max: Math.round(screen.height * devicePixelRatio) } };
+  // Sempre deitado (filme é paisagem): com o app aberto no monitor em pé, o formato dele (9:16) ficaria pior que o 4:3.
+  const w = Math.round(screen.width * devicePixelRatio), h = Math.round(screen.height * devicePixelRatio);
+  const tam = { width: { max: Math.max(w, h) }, height: { max: Math.min(w, h) } };
   const s = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: cfg().fps, ...tam }, audio: true, surfaceSwitching: 'include', windowAudio: 'window' });
   const video = s.getVideoTracks()[0];
   video.contentHint = 'motion';     // filme: fluidez antes de nitidez de texto
